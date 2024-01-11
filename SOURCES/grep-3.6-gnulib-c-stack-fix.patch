@@ -1,0 +1,686 @@
+diff --git a/gnulib-tests/Makefile.in b/gnulib-tests/Makefile.in
+index aa979f4..194cc7d 100644
+--- a/gnulib-tests/Makefile.in
++++ b/gnulib-tests/Makefile.in
+@@ -3100,7 +3100,7 @@ test_argmatch_LDADD = $(LDADD) @LIBINTL@ $(LIB_MBRTOWC)
+ test_bind_LDADD = $(LDADD) @LIBSOCKET@ $(INET_PTON_LIB)
+ test_btowc_LDADD = $(LDADD) $(LIB_SETLOCALE)
+ test_c_ctype_LDADD = $(LDADD) $(LIB_SETLOCALE)
+-test_c_stack_LDADD = $(LDADD) $(LIBCSTACK) @LIBINTL@
++test_c_stack_LDADD = $(LDADD) -lsigsegv @LIBINTL@
+ test_c_strcasecmp_LDADD = $(LDADD) $(LIB_SETLOCALE)
+ test_c_strncasecmp_LDADD = $(LDADD) $(LIB_SETLOCALE)
+ test_connect_LDADD = $(LDADD) @LIBSOCKET@ $(INET_PTON_LIB)
+diff --git a/gnulib-tests/gnulib.mk b/gnulib-tests/gnulib.mk
+index b1dc6f9..ba0594e 100644
+--- a/gnulib-tests/gnulib.mk
++++ b/gnulib-tests/gnulib.mk
+@@ -209,7 +209,7 @@ EXTRA_DIST += test-c-ctype.c macros.h
+ TESTS += test-c-stack.sh test-c-stack2.sh
+ TESTS_ENVIRONMENT += LIBSIGSEGV='@LIBSIGSEGV@'
+ check_PROGRAMS += test-c-stack
+-test_c_stack_LDADD = $(LDADD) $(LIBCSTACK) @LIBINTL@
++test_c_stack_LDADD = $(LDADD) -lsigsegv @LIBINTL@
+ MOSTLYCLEANFILES += t-c-stack.tmp t-c-stack2.tmp
+ EXTRA_DIST += test-c-stack.c test-c-stack.sh test-c-stack2.sh macros.h
+ 
+diff --git a/lib/c-stack.c b/lib/c-stack.c
+index 3aea16a..b0e5cb1 100644
+--- a/lib/c-stack.c
++++ b/lib/c-stack.c
+@@ -1,6 +1,6 @@
+ /* Stack overflow handling.
+ 
+-   Copyright (C) 2002, 2004, 2006, 2008-2020 Free Software Foundation, Inc.
++   Copyright (C) 2002, 2004, 2006, 2008-2021 Free Software Foundation, Inc.
+ 
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+@@ -37,54 +37,28 @@
+ 
+ #include "c-stack.h"
+ 
+-#include "gettext.h"
+-#define _(msgid) gettext (msgid)
+-
+ #include <errno.h>
+ #include <inttypes.h>
+-
+ #include <signal.h>
+-#if ! HAVE_STACK_T && ! defined stack_t
+-typedef struct sigaltstack stack_t;
+-#endif
+-
+-#include <stdbool.h>
+ #include <stddef.h>
+ #include <stdlib.h>
+ #include <string.h>
+-
+-/* Pre-2008 POSIX declared ucontext_t in ucontext.h instead of signal.h.  */
+-#if HAVE_UCONTEXT_H
+-# include <ucontext.h>
+-#endif
+-
+ #include <unistd.h>
+ 
+ #if DEBUG
+ # include <stdio.h>
+ #endif
+ 
+-/* Use libsigsegv only if needed; kernels like Solaris can detect
+-   stack overflow without the overhead of an external library.  */
+-#define USE_LIBSIGSEGV (!HAVE_XSI_STACK_OVERFLOW_HEURISTIC && HAVE_LIBSIGSEGV)
+-
+-#if USE_LIBSIGSEGV
+-# include <sigsegv.h>
+-#endif
++#include <sigsegv.h>
+ 
+ #include "exitfail.h"
+-#include "ignore-value.h"
+-#include "intprops.h"
+ #include "getprogname.h"
++#include "ignore-value.h"
+ 
+-#if defined SA_ONSTACK && defined SA_SIGINFO
+-# define SIGINFO_WORKS 1
+-#else
+-# define SIGINFO_WORKS 0
+-# ifndef SA_ONSTACK
+-#  define SA_ONSTACK 0
+-# endif
+-#endif
++#include "gettext.h"
++#define _(msgid) gettext (msgid)
++
++#if HAVE_STACK_OVERFLOW_RECOVERY
+ 
+ /* Storage for the alternate signal stack.
+    64 KiB is not too large for Gnulib-using apps, and is large enough
+@@ -106,9 +80,6 @@ static _GL_ASYNC_SAFE void (* volatile segv_action) (int);
+ static char const * volatile program_error_message;
+ static char const * volatile stack_overflow_message;
+ 
+-#if (USE_LIBSIGSEGV                                           \
+-     || (HAVE_DECL_SIGALTSTACK && HAVE_STACK_OVERFLOW_HANDLING))
+-
+ /* Output an error message, then exit with status EXIT_FAILURE if it
+    appears to have been a stack overflow, or with a core dump
+    otherwise.  This function is async-signal-safe.  */
+@@ -118,12 +89,6 @@ static char const * volatile progname;
+ static _GL_ASYNC_SAFE _Noreturn void
+ die (int signo)
+ {
+-# if !SIGINFO_WORKS && !USE_LIBSIGSEGV
+-  /* We can't easily determine whether it is a stack overflow; so
+-     assume that the rest of our program is perfect (!) and that
+-     this segmentation violation is a stack overflow.  */
+-  signo = 0;
+-# endif
+   segv_action (signo);
+   char const *message = signo ? program_error_message : stack_overflow_message;
+ 
+@@ -164,12 +129,8 @@ null_action (int signo _GL_UNUSED)
+ {
+ }
+ 
+-#endif /* SIGALTSTACK || LIBSIGSEGV */
+-
+-#if USE_LIBSIGSEGV
+-
+ /* Pacify GCC 9.3.1, which otherwise would complain about segv_handler.  */
+-# if __GNUC_PREREQ (4, 6)
++# if 4 < __GNUC__ + (6 <= __GNUC_MINOR__)
+ #  pragma GCC diagnostic ignored "-Wsuggest-attribute=pure"
+ # endif
+ 
+@@ -240,132 +201,7 @@ c_stack_action (_GL_ASYNC_SAFE void (*action) (int))
+   return 0;
+ }
+ 
+-#elif HAVE_DECL_SIGALTSTACK && HAVE_STACK_OVERFLOW_HANDLING
+-
+-# if SIGINFO_WORKS
+-
+-static size_t volatile page_size;
+-
+-/* Handle a segmentation violation and exit.  This function is
+-   async-signal-safe.  */
+-
+-static _GL_ASYNC_SAFE _Noreturn void
+-segv_handler (int signo, siginfo_t *info, void *context _GL_UNUSED)
+-{
+-  /* Clear SIGNO if it seems to have been a stack overflow.  */
+-
+-  /* If si_code is nonpositive, something like raise (SIGSEGV) occurred
+-     so it cannot be a stack overflow.  */
+-  bool cannot_be_stack_overflow = info->si_code <= 0;
+-
+-  /* An unaligned address cannot be a stack overflow.  */
+-#  if FAULT_YIELDS_SIGBUS
+-  cannot_be_stack_overflow |= signo == SIGBUS && info->si_code == BUS_ADRALN;
+-#  endif
+-
+-  /* If we can't easily determine that it is not a stack overflow,
+-     assume that the rest of our program is perfect (!) and that
+-     this segmentation violation is a stack overflow.
+-
+-     Note that although both Linux and Solaris provide
+-     sigaltstack, SA_ONSTACK, and SA_SIGINFO, currently only
+-     Solaris satisfies the XSI heuristic.  This is because
+-     Solaris populates uc_stack with the details of the
+-     interrupted stack, while Linux populates it with the details
+-     of the current stack.  */
+-  if (!cannot_be_stack_overflow)
+-    {
+-      /* If the faulting address is within the stack, or within one
+-         page of the stack, assume that it is a stack overflow.  */
+-      uintptr_t faulting_address = (uintptr_t) info->si_addr;
+-
+-      /* On all platforms we know of, the first page is not in the
+-         stack to catch null pointer dereferening.  However, all other
+-         pages might be in the stack.  */
+-      void *stack_base = (void *) (uintptr_t) page_size;
+-      uintptr_t stack_size = 0; stack_size -= page_size;
+-#  if HAVE_XSI_STACK_OVERFLOW_HEURISTIC
+-      /* Tighten the stack bounds via the XSI heuristic.  */
+-      ucontext_t const *user_context = context;
+-      stack_base = user_context->uc_stack.ss_sp;
+-      stack_size = user_context->uc_stack.ss_size;
+-#  endif
+-      uintptr_t base = (uintptr_t) stack_base,
+-        lo = (INT_SUBTRACT_WRAPV (base, page_size, &lo) || lo < page_size
+-              ? page_size : lo),
+-        hi = ((INT_ADD_WRAPV (base, stack_size, &hi)
+-               || INT_ADD_WRAPV (hi, page_size - 1, &hi))
+-              ? UINTPTR_MAX : hi);
+-      if (lo <= faulting_address && faulting_address <= hi)
+-        signo = 0;
+-
+-#   if DEBUG
+-      {
+-        char buf[1024];
+-        ignore_value (write (STDERR_FILENO, buf,
+-                             sprintf (buf,
+-                                      ("segv_handler code=%d fault=%p base=%p"
+-                                       " size=0x%zx page=0x%zx signo=%d\n"),
+-                                      info->si_code, info->si_addr, stack_base,
+-                                      stack_size, page_size, signo)));
+-      }
+-#  endif
+-    }
+-
+-  die (signo);
+-}
+-# endif
+-
+-int
+-c_stack_action (_GL_ASYNC_SAFE void (*action) (int))
+-{
+-  stack_t st;
+-  st.ss_flags = 0;
+-  st.ss_sp = alternate_signal_stack;
+-  st.ss_size = sizeof alternate_signal_stack;
+-# if SIGALTSTACK_SS_REVERSED
+-  /* Irix mistakenly treats ss_sp as the upper bound, rather than
+-     lower bound, of the alternate stack.  */
+-  st.ss_size -= sizeof (void *);
+-  char *ss_sp = st.ss_sp;
+-  st.ss_sp = ss_sp + st.ss_size;
+-# endif
+-  int r = sigaltstack (&st, NULL);
+-  if (r != 0)
+-    return r;
+-
+-  segv_action = action ? action : null_action;
+-  program_error_message = _("program error");
+-  stack_overflow_message = _("stack overflow");
+-  progname = getprogname ();
+-
+-# if SIGINFO_WORKS
+-  page_size = sysconf (_SC_PAGESIZE);
+-# endif
+-
+-  struct sigaction act;
+-  sigemptyset (&act.sa_mask);
+-
+-# if SIGINFO_WORKS
+-  /* POSIX 1003.1-2001 says SA_RESETHAND implies SA_NODEFER, but
+-     this is not true on Solaris 8 at least.  It doesn't hurt to use
+-     SA_NODEFER here, so leave it in.  */
+-  act.sa_flags = SA_NODEFER | SA_ONSTACK | SA_RESETHAND | SA_SIGINFO;
+-  act.sa_sigaction = segv_handler;
+-# else
+-  act.sa_flags = SA_NODEFER | SA_ONSTACK | SA_RESETHAND;
+-  act.sa_handler = die;
+-# endif
+-
+-# if FAULT_YIELDS_SIGBUS
+-  if (sigaction (SIGBUS, &act, NULL) < 0)
+-    return -1;
+-# endif
+-  return sigaction (SIGSEGV, &act, NULL);
+-}
+-
+-#else /* ! (USE_LIBSIGSEGV
+-            || (HAVE_DECL_SIGALTSTACK && HAVE_STACK_OVERFLOW_HANDLING)) */
++#else /* !HAVE_STACK_OVERFLOW_RECOVERY */
+ 
+ int
+ c_stack_action (_GL_ASYNC_SAFE void (*action) (int)  _GL_UNUSED)
+diff --git a/m4/c-stack.m4 b/m4/c-stack.m4
+index 85107f4..7cccb06 100644
+--- a/m4/c-stack.m4
++++ b/m4/c-stack.m4
+@@ -1,376 +1,21 @@
+ # Check prerequisites for compiling lib/c-stack.c.
+ 
+-# Copyright (C) 2002-2004, 2008-2020 Free Software Foundation, Inc.
++# Copyright (C) 2002-2004, 2008-2021 Free Software Foundation, Inc.
+ # This file is free software; the Free Software Foundation
+ # gives unlimited permission to copy and/or distribute it,
+ # with or without modifications, as long as this notice is preserved.
+ 
+ # Written by Paul Eggert.
+ 
+-# serial 20
+-
+-AC_DEFUN([AC_SYS_XSI_STACK_OVERFLOW_HEURISTIC],
+-  [
+-   AC_REQUIRE([AC_CANONICAL_HOST])
+-   AC_CHECK_FUNCS_ONCE([setrlimit])
+-   AC_CHECK_HEADERS_ONCE([ucontext.h])
+-
+-   dnl List of signals that are sent when an invalid virtual memory address
+-   dnl is accessed, or when the stack overflows.
+-   dnl Either { SIGSEGV } or { SIGSEGV, SIGBUS }.
+-   case "$host_os" in
+-     sunos4* | freebsd* | dragonfly* | openbsd* | mirbsd* | netbsd* | kfreebsd* | knetbsd*) # BSD systems
+-       FAULT_YIELDS_SIGBUS=1 ;;
+-     hpux*) # HP-UX
+-       FAULT_YIELDS_SIGBUS=1 ;;
+-     macos* | darwin*) # Mac OS X
+-       FAULT_YIELDS_SIGBUS=1 ;;
+-     gnu*) # Hurd
+-       FAULT_YIELDS_SIGBUS=1 ;;
+-     *)
+-       FAULT_YIELDS_SIGBUS=0 ;;
+-   esac
+-   AC_DEFINE_UNQUOTED([FAULT_YIELDS_SIGBUS], [$FAULT_YIELDS_SIGBUS],
+-     [Define to 1 if an invalid memory address access may yield a SIGBUS.])
+-
+-   AC_CACHE_CHECK([for working C stack overflow detection],
+-     [gl_cv_sys_stack_overflow_works],
+-     [AC_RUN_IFELSE([AC_LANG_SOURCE(
+-           [[
+-            #include <unistd.h>
+-            #include <signal.h>
+-            #if HAVE_SETRLIMIT
+-            # include <sys/types.h>
+-            # include <sys/time.h>
+-            # include <sys/resource.h>
+-            #endif
+-            #ifndef SIGSTKSZ
+-            # define SIGSTKSZ 16384
+-            #endif
+-
+-            static union
+-            {
+-              char buffer[2 * SIGSTKSZ];
+-              long double ld;
+-              long u;
+-              void *p;
+-            } alternate_signal_stack;
+-
+-            static void
+-            segv_handler (int signo)
+-            {
+-              _exit (0);
+-            }
+-
+-            static int
+-            c_stack_action ()
+-            {
+-              stack_t st;
+-              struct sigaction act;
+-              int r;
+-
+-              st.ss_flags = 0;
+-              /* Use the midpoint to avoid Irix sigaltstack bug.  */
+-              st.ss_sp = alternate_signal_stack.buffer + SIGSTKSZ;
+-              st.ss_size = SIGSTKSZ;
+-              r = sigaltstack (&st, 0);
+-              if (r != 0)
+-                return 1;
+-
+-              sigemptyset (&act.sa_mask);
+-              act.sa_flags = SA_NODEFER | SA_ONSTACK | SA_RESETHAND;
+-              act.sa_handler = segv_handler;
+-              #if FAULT_YIELDS_SIGBUS
+-              if (sigaction (SIGBUS, &act, 0) < 0)
+-                return 2;
+-              #endif
+-              if (sigaction (SIGSEGV, &act, 0) < 0)
+-                return 3;
+-              return 0;
+-            }
+-            static volatile int *
+-            recurse_1 (volatile int n, volatile int *p)
+-            {
+-              if (n >= 0)
+-                *recurse_1 (n + 1, p) += n;
+-              return p;
+-            }
+-            static int
+-            recurse (volatile int n)
+-            {
+-              int sum = 0;
+-              return *recurse_1 (n, &sum);
+-            }
+-            int
+-            main ()
+-            {
+-              int result;
+-              #if HAVE_SETRLIMIT && defined RLIMIT_STACK
+-              /* Before starting the endless recursion, try to be friendly
+-                 to the user's machine.  On some Linux 2.2.x systems, there
+-                 is no stack limit for user processes at all.  We don't want
+-                 to kill such systems.  */
+-              struct rlimit rl;
+-              rl.rlim_cur = rl.rlim_max = 0x100000; /* 1 MB */
+-              setrlimit (RLIMIT_STACK, &rl);
+-              #endif
+-
+-              result = c_stack_action ();
+-              if (result != 0)
+-                return result;
+-              return recurse (0);
+-            }
+-           ]])],
+-        [gl_cv_sys_stack_overflow_works=yes],
+-        [gl_cv_sys_stack_overflow_works=no],
+-        [case "$host_os" in
+-                   # Guess no on native Windows.
+-           mingw*) gl_cv_sys_stack_overflow_works="guessing no" ;;
+-           *)      gl_cv_sys_stack_overflow_works=cross-compiling ;;
+-         esac
+-        ])
+-     ])
+-
+-  if test "$gl_cv_sys_stack_overflow_works" = yes; then
+-   AC_DEFINE([HAVE_STACK_OVERFLOW_HANDLING], [1],
+-     [Define to 1 if extending the stack slightly past the limit causes
+-      a SIGSEGV which can be handled on an alternate stack established
+-      with sigaltstack.])
+-
+-    dnl The ss_sp field of a stack_t is, according to POSIX, the lowest address
+-    dnl of the memory block designated as an alternate stack. But IRIX 5.3
+-    dnl interprets it as the highest address!
+-    AC_CACHE_CHECK([for correct stack_t interpretation],
+-      [gl_cv_sigaltstack_low_base], [
+-      AC_RUN_IFELSE([
+-        AC_LANG_SOURCE([[
+-#include <stdlib.h>
+-#include <signal.h>
+-#if HAVE_SYS_SIGNAL_H
+-# include <sys/signal.h>
+-#endif
+-#ifndef SIGSTKSZ
+-# define SIGSTKSZ 16384
+-#endif
+-volatile char *stack_lower_bound;
+-volatile char *stack_upper_bound;
+-static void check_stack_location (volatile char *addr)
+-{
+-  if (addr >= stack_lower_bound && addr <= stack_upper_bound)
+-    exit (0);
+-  else
+-    exit (1);
+-}
+-static void stackoverflow_handler (int sig)
+-{
+-  char dummy;
+-  check_stack_location (&dummy);
+-}
+-int main ()
+-{
+-  char mystack[2 * SIGSTKSZ];
+-  stack_t altstack;
+-  struct sigaction action;
+-  /* Install the alternate stack.  */
+-  altstack.ss_sp = mystack + SIGSTKSZ;
+-  altstack.ss_size = SIGSTKSZ;
+-  stack_lower_bound = (char *) altstack.ss_sp;
+-  stack_upper_bound = (char *) altstack.ss_sp + altstack.ss_size - 1;
+-  altstack.ss_flags = 0; /* no SS_DISABLE */
+-  if (sigaltstack (&altstack, NULL) < 0)
+-    exit (2);
+-  /* Install the SIGSEGV handler.  */
+-  sigemptyset (&action.sa_mask);
+-  action.sa_handler = &stackoverflow_handler;
+-  action.sa_flags = SA_ONSTACK;
+-  if (sigaction (SIGSEGV, &action, (struct sigaction *) NULL) < 0)
+-    exit(3);
+-  /* Provoke a SIGSEGV.  */
+-  raise (SIGSEGV);
+-  exit (4);
+-}]])],
+-      [gl_cv_sigaltstack_low_base=yes],
+-      [gl_cv_sigaltstack_low_base=no],
+-      [gl_cv_sigaltstack_low_base=cross-compiling])])
+-   if test "$gl_cv_sigaltstack_low_base" = no; then
+-      AC_DEFINE([SIGALTSTACK_SS_REVERSED], [1],
+-        [Define if sigaltstack() interprets the stack_t.ss_sp field
+-         incorrectly, as the highest address of the alternate stack range
+-         rather than as the lowest address.])
+-    fi
+-
+-   AC_CACHE_CHECK([for precise C stack overflow detection],
+-     [gl_cv_sys_xsi_stack_overflow_heuristic],
+-     [dnl On Linux/sparc64 (both in 32-bit and 64-bit mode), it would be wrong
+-      dnl to set HAVE_XSI_STACK_OVERFLOW_HEURISTIC to 1, because the third
+-      dnl argument passed to the segv_handler is a 'struct sigcontext *', not
+-      dnl an 'ucontext_t *'.  It would lead to a failure of test-c-stack2.sh.
+-      case "${host_os}--${host_cpu}" in
+-        linux*--sparc*)
+-          gl_cv_sys_xsi_stack_overflow_heuristic=no
+-          ;;
+-        *)
+-          AC_RUN_IFELSE(
+-            [AC_LANG_SOURCE(
+-               [[
+-                #include <unistd.h>
+-                #include <signal.h>
+-                #if HAVE_UCONTEXT_H
+-                # include <ucontext.h>
+-                #endif
+-                #if HAVE_SETRLIMIT
+-                # include <sys/types.h>
+-                # include <sys/time.h>
+-                # include <sys/resource.h>
+-                #endif
+-                #ifndef SIGSTKSZ
+-                # define SIGSTKSZ 16384
+-                #endif
+-
+-                static union
+-                {
+-                  char buffer[2 * SIGSTKSZ];
+-                  long double ld;
+-                  long u;
+-                  void *p;
+-                } alternate_signal_stack;
+-
+-                #if STACK_DIRECTION
+-                # define find_stack_direction(ptr) STACK_DIRECTION
+-                #else
+-                static int
+-                find_stack_direction (char const *addr)
+-                {
+-                  char dummy;
+-                  return (! addr ? find_stack_direction (&dummy)
+-                          : addr < &dummy ? 1 : -1);
+-                }
+-                #endif
+-
+-                static void
+-                segv_handler (int signo, siginfo_t *info, void *context)
+-                {
+-                  if (0 < info->si_code)
+-                    {
+-                      /* For XSI heuristics to work, we need uc_stack to
+-                         describe the interrupted stack (as on Solaris), and
+-                         not the currently executing stack (as on Linux).  */
+-                      ucontext_t const *user_context = context;
+-                      char const *stack_min = user_context->uc_stack.ss_sp;
+-                      size_t stack_size = user_context->uc_stack.ss_size;
+-                      char const *faulting_address = info->si_addr;
+-                      size_t s = faulting_address - stack_min;
+-                      size_t page_size = sysconf (_SC_PAGESIZE);
+-                      if (find_stack_direction (0) < 0)
+-                        s += page_size;
+-                      if (s < stack_size + page_size)
+-                        _exit (0);
+-                      _exit (4);
+-                    }
+-                  _exit (5);
+-                }
+-
+-                static int
+-                c_stack_action ()
+-                {
+-                  stack_t st;
+-                  struct sigaction act;
+-                  int r;
+-
+-                  st.ss_flags = 0;
+-                  /* Use the midpoint to avoid Irix sigaltstack bug.  */
+-                  st.ss_sp = alternate_signal_stack.buffer + SIGSTKSZ;
+-                  st.ss_size = SIGSTKSZ;
+-                  r = sigaltstack (&st, 0);
+-                  if (r != 0)
+-                    return 1;
+-
+-                  sigemptyset (&act.sa_mask);
+-                  act.sa_flags = SA_NODEFER | SA_ONSTACK | SA_RESETHAND | SA_SIGINFO;
+-                  act.sa_sigaction = segv_handler;
+-                  #if FAULT_YIELDS_SIGBUS
+-                  if (sigaction (SIGBUS, &act, 0) < 0)
+-                    return 2;
+-                  #endif
+-                  if (sigaction (SIGSEGV, &act, 0) < 0)
+-                    return 3;
+-                  return 0;
+-                }
+-                static volatile int *
+-                recurse_1 (volatile int n, volatile int *p)
+-                {
+-                  if (n >= 0)
+-                    *recurse_1 (n + 1, p) += n;
+-                  return p;
+-                }
+-                static int
+-                recurse (volatile int n)
+-                {
+-                  int sum = 0;
+-                  return *recurse_1 (n, &sum);
+-                }
+-                int
+-                main ()
+-                {
+-                  int result;
+-                  #if HAVE_SETRLIMIT && defined RLIMIT_STACK
+-                  /* Before starting the endless recursion, try to be friendly
+-                     to the user's machine.  On some Linux 2.2.x systems, there
+-                     is no stack limit for user processes at all.  We don't want
+-                     to kill such systems.  */
+-                  struct rlimit rl;
+-                  rl.rlim_cur = rl.rlim_max = 0x100000; /* 1 MB */
+-                  setrlimit (RLIMIT_STACK, &rl);
+-                  #endif
+-
+-                  result = c_stack_action ();
+-                  if (result != 0)
+-                    return result;
+-                  return recurse (0);
+-                }
+-               ]])],
+-            [gl_cv_sys_xsi_stack_overflow_heuristic=yes],
+-            [gl_cv_sys_xsi_stack_overflow_heuristic=no],
+-            [gl_cv_sys_xsi_stack_overflow_heuristic=cross-compiling])
+-          ;;
+-      esac
+-     ])
+-
+-   if test "$gl_cv_sys_xsi_stack_overflow_heuristic" = yes; then
+-     AC_DEFINE([HAVE_XSI_STACK_OVERFLOW_HEURISTIC], [1],
+-       [Define to 1 if extending the stack slightly past the limit causes
+-        a SIGSEGV, and an alternate stack can be established with sigaltstack,
+-        and the signal handler is passed a context that specifies the
+-        run time stack.  This behavior is defined by POSIX 1003.1-2001
+-        with the X/Open System Interface (XSI) option
+-        and is a standardized way to implement a SEGV-based stack
+-        overflow detection heuristic.])
+-   fi
+-  fi])
+-
+-
+-AC_DEFUN([gl_PREREQ_C_STACK],
+-  [AC_REQUIRE([AC_SYS_XSI_STACK_OVERFLOW_HEURISTIC])
+-
+-   AC_CHECK_FUNCS_ONCE([sigaltstack])
+-   AC_CHECK_DECLS([sigaltstack], , , [[#include <signal.h>]])
+-
+-   AC_CHECK_HEADERS_ONCE([ucontext.h])
+-
+-   AC_CHECK_TYPES([stack_t], , , [[#include <signal.h>]])
+-
+-   dnl c-stack does not need -lsigsegv if the system has XSI heuristics.
+-   if test "$gl_cv_sys_xsi_stack_overflow_heuristic" != yes; then
+-     gl_LIBSIGSEGV
+-     if test "$gl_cv_lib_sigsegv" = yes; then
+-       AC_SUBST([LIBCSTACK], [$LIBSIGSEGV])
+-       AC_SUBST([LTLIBCSTACK], [$LTLIBSIGSEGV])
+-     fi
+-   fi
+-])
++# serial 23
+ 
+ AC_DEFUN([gl_C_STACK],
+ [
+-  dnl Prerequisites of lib/c-stack.c.
+-  gl_PREREQ_C_STACK
++  dnl 'c-stack' needs -lsigsegv if and only if the 'sigsegv' module needs it.
++  if test "$with_libsigsegv" = yes; then
++    if test "$gl_cv_lib_sigsegv" = yes; then
++      AC_SUBST([LIBCSTACK], [$LIBSIGSEGV])
++      AC_SUBST([LTLIBCSTACK], [$LTLIBSIGSEGV])
++    fi
++  fi
+ ])
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 1aebcf7..055ee17 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -45,7 +45,7 @@ LDADD = \
+   ../lib/libgreputils.a $(LIBINTL) ../lib/libgreputils.a $(LIBICONV) \
+   $(LIBTHREAD)
+ 
+-grep_LDADD = $(LDADD) $(PCRE_LIBS) $(LIBCSTACK)
++grep_LDADD = $(LDADD) $(PCRE_LIBS) -lsigsegv
+ localedir = $(datadir)/locale
+ AM_CPPFLAGS = -I$(top_builddir)/lib -I$(top_srcdir)/lib
+ 
+diff --git a/src/Makefile.in b/src/Makefile.in
+index 20c43b5..a276db8 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -1541,7 +1541,7 @@ LDADD = \
+   ../lib/libgreputils.a $(LIBINTL) ../lib/libgreputils.a $(LIBICONV) \
+   $(LIBTHREAD)
+ 
+-grep_LDADD = $(LDADD) $(PCRE_LIBS) $(LIBCSTACK)
++grep_LDADD = $(LDADD) $(PCRE_LIBS) -lsigsegv
+ AM_CPPFLAGS = -I$(top_builddir)/lib -I$(top_srcdir)/lib
+ EXTRA_DIST = egrep.sh
+ CLEANFILES = egrep fgrep *-t
